@@ -14,7 +14,7 @@
     <VCProjectVersion>16.0</VCProjectVersion>
     <ProjectGuid>{B2C3D4E5-F6A7-4B5C-9D0E-1F2A3B4C5D6E}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
-    <RootNamespace>demo_child</RootNamespace>
+    <RootNamespace>DemoChild</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />

@@ -9,7 +9,7 @@
 
 #define PIPE_NAME L"\\\\.\\pipe\\IPCDemoPipe"
 #define BUFFER_SIZE 512
-#define APPCONTAINER_NAME L"IPCDemo.ChildContainer"
+#define APPCONTAINER_NAME L"SandboxIpcDemoApp"
 
 // Function to get and display the current process integrity level
 void DisplayProcessSecurityInfo()
@@ -18,7 +18,7 @@ void DisplayProcessSecurityInfo()
 
   if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken))
   {
-    printf("[Parent] Failed to open process token. Error: %lu\n", GetLastError());
+    printf("[Host] Failed to open process token. Error: %lu\n", GetLastError());
     return;
   }
 
@@ -68,86 +68,115 @@ void DisplayProcessSecurityInfo()
   CloseHandle(hToken);
 }
 
-// Create a security descriptor that allows AppContainer access
-PSECURITY_DESCRIPTOR CreateAppContainerAccessibleSD()
-{
-  PSECURITY_DESCRIPTOR pSD = nullptr;
 
-  // SDDL string that grants:
-  // - Generic All access to the current user (GA)
-  // - Generic Read/Write access to ALL APPLICATION PACKAGES (AC) - AppContainer processes
-  // S-1-15-2-1 is the well-known SID for ALL APPLICATION PACKAGES
-  LPCWSTR sddl = L"D:(A;;GA;;;WD)(A;;GRGW;;;AC)";
-
-  if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-    sddl,
-    SDDL_REVISION_1,
-    &pSD,
-    nullptr))
-  {
-    printf("Failed to create security descriptor. Error: %lu\n", GetLastError());
-    return nullptr;
-  }
-
-  return pSD;
-}
-
-bool SendMessage(HANDLE hPipe, const char* message)
-{
-  DWORD bytesWritten;
-  DWORD messageLen = (DWORD)strlen(message) + 1;
-
-  printf("[Parent] Sending: %s\n", message);
-
-  if (!WriteFile(hPipe, message, messageLen, &bytesWritten, nullptr))
-  {
-    printf("[Parent] Failed to write to pipe. Error: %lu\n", GetLastError());
+bool GetSecurityAttributes(SECURITY_ATTRIBUTES& sa,
+  SECURITY_DESCRIPTOR& sd,
+  const PSID& app_container_sid) {
+  // Create a new security descriptor
+  if (0 == ::InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION)) {
+    auto gle = ::GetLastError();
+    printf("InitializeSecurityDescriptor failed. Error: %lu\n", gle);
     return false;
   }
 
-  return true;
-}
+  LPCSTR everyone_sid_string = "S-1-1-0"; // Also known as world sid.
+  PSID everyone_sid;
 
-bool ReceiveMessage(HANDLE hPipe, char* buffer, DWORD bufferSize)
-{
-  DWORD bytesRead;
-
-  if (!ReadFile(hPipe, buffer, bufferSize, &bytesRead, nullptr))
-  {
-    printf("[Parent] Failed to read from pipe. Error: %lu\n", GetLastError());
+  if (!ConvertStringSidToSidA(everyone_sid_string, &everyone_sid)) {
+    printf("Failed to convert String to Sid");
     return false;
   }
 
-  printf("[Parent] Received: %s\n", buffer);
+  // Create a new ACL
+  PACL acl = nullptr;
+  constexpr unsigned int kMaxExplicitAccessEntries = 2;
+  EXPLICIT_ACCESSW ea_list[kMaxExplicitAccessEntries] = {};
+  for (int i = 0; i < kMaxExplicitAccessEntries; i++) {
+    ea_list[i].grfAccessPermissions = FILE_ALL_ACCESS;
+    ea_list[i].grfAccessMode = GRANT_ACCESS;
+    ea_list[i].grfInheritance = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
+    ea_list[i].Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    ea_list[i].Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+    ea_list[i].Trustee.pMultipleTrustee = nullptr;
+  }
+
+  ea_list[0].Trustee.ptstrName = static_cast<LPWCH>(everyone_sid);
+  // here we explicitly give access to the AppContainer SID
+  ea_list[1].Trustee.ptstrName = static_cast<LPWCH>(app_container_sid);
+
+  auto result = ::SetEntriesInAclW(kMaxExplicitAccessEntries, ea_list, nullptr, &acl);
+  if (result != ERROR_SUCCESS) {
+    printf("SetEntriesInAclW failed. Error: %lu\n", result);
+    return false;
+  }
+
+  // Set the DACL in the security descriptor
+  if (!::SetSecurityDescriptorDacl(&sd, TRUE, acl, FALSE)) {
+    printf("SetSecurityDescriptorDacl failed. Error: %lu\n", GetLastError());
+    return false;
+  }
+  sa.lpSecurityDescriptor = &sd;
   return true;
 }
+
+bool SendMessage(HANDLE hPipe, const char* message);
+bool ReceiveMessage(HANDLE hPipe, char* buffer, DWORD bufferSize);
 
 int main()
 {
-  printf("=== IPC Demo - Parent Process ===\n");
-  printf("[Parent] Starting...\n");
+  printf("=== IPC Demo - Host Process ===\n");
+  printf("[Host] Starting...\n");
 
   // Display security information
-  printf("\n[Parent] === Security Context Information ===\n");
+  printf("\n[Host] === Security Context Information ===\n");
   DisplayProcessSecurityInfo();
-  printf("[Parent] ==========================================\n\n");
+  printf("[Host] ==========================================\n\n");
 
-  // Create security attributes for the pipe
-  SECURITY_ATTRIBUTES sa = { 0 };
-  sa.nLength = sizeof(SECURITY_ATTRIBUTES);
-  sa.lpSecurityDescriptor = CreateAppContainerAccessibleSD();
-  sa.bInheritHandle = FALSE;
 
-  if (sa.lpSecurityDescriptor == nullptr)
+  // Create or get AppContainer profile for the child process
+  PSID pAppContainerSid = nullptr;
+  HRESULT hr = CreateAppContainerProfile(
+    APPCONTAINER_NAME,
+    L"IPC Demo Child AppContainer",
+    L"Sandboxed child process for IPC demonstration",
+    nullptr,  // No capabilities for now
+    0,
+    &pAppContainerSid);
+
+  if (FAILED(hr) && hr != HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS))
   {
-    printf("[Parent] Failed to create security descriptor\n");
+    printf("[Parent] Failed to create AppContainer profile. HRESULT: 0x%08X\n", hr);
     return 1;
   }
 
-  // Create named pipe BEFORE launching child process
-  printf("[Parent] Creating named pipe: %ls\n", PIPE_NAME);
+  // If AppContainerProfile already exists, get the SID
+  if (hr == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS))
+  {
+    hr = DeriveAppContainerSidFromAppContainerName(APPCONTAINER_NAME, &pAppContainerSid);
+    if (FAILED(hr))
+    {
+      printf("[Parent] Failed to get AppContainer SID. HRESULT: 0x%08X\n", hr);
+      return 1;
+    }
+  }
 
-  HANDLE hPipe = CreateNamedPipeW(
+
+  // Use the the AppContainer SID to create a security attributes for the Named Pipe
+  SECURITY_DESCRIPTOR sd = { 0 };
+  SECURITY_ATTRIBUTES sa = { 0 };
+  sa.bInheritHandle = FALSE;
+  sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+
+ 
+  if (!GetSecurityAttributes(sa, sd, pAppContainerSid)) {
+    printf("[Host] Failed to create security attributes\n");
+    return 1;
+  }
+ 
+  // Create named pipe BEFORE launching child process
+  printf("[Host] Creating named pipe: %ls\n", PIPE_NAME);
+
+  HANDLE hPipe = ::CreateNamedPipeW(
     PIPE_NAME,
     PIPE_ACCESS_DUPLEX,
     PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
@@ -165,39 +194,6 @@ int main()
   }
 
   printf("[Parent] Named pipe created successfully\n");
-
-  // Create or get AppContainer profile for the child process
-  PSID pAppContainerSid = nullptr;
-  HRESULT hr = CreateAppContainerProfile(
-    APPCONTAINER_NAME,
-    L"IPC Demo Child AppContainer",
-    L"Sandboxed child process for IPC demonstration",
-    nullptr,  // No capabilities for now
-    0,
-    &pAppContainerSid);
-
-  if (FAILED(hr) && hr != HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS))
-  {
-    printf("[Parent] Failed to create AppContainer profile. HRESULT: 0x%08X\n", hr);
-    CloseHandle(hPipe);
-    LocalFree(sa.lpSecurityDescriptor);
-    return 1;
-  }
-
-  // If already exists, get the SID
-  if (hr == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS))
-  {
-    hr = DeriveAppContainerSidFromAppContainerName(APPCONTAINER_NAME, &pAppContainerSid);
-    if (FAILED(hr))
-    {
-      printf("[Parent] Failed to get AppContainer SID. HRESULT: 0x%08X\n", hr);
-      CloseHandle(hPipe);
-      LocalFree(sa.lpSecurityDescriptor);
-      return 1;
-    }
-  }
-
-  printf("[Parent] AppContainer profile created/retrieved successfully\n");
 
   // Set up security capabilities for the AppContainer
   SECURITY_CAPABILITIES securityCapabilities = { 0 };
@@ -273,7 +269,7 @@ int main()
 
   // Construct full path to child executable
   wchar_t cmdLine[MAX_PATH];
-  swprintf_s(cmdLine, MAX_PATH, L"\"%sdemo_child.exe\"", modulePath);
+  swprintf_s(cmdLine, MAX_PATH, L"\"%schild.exe\"", modulePath);
 
   printf("[Parent] Launching child process: %ls\n", cmdLine);
 
@@ -397,4 +393,37 @@ int main()
   getchar();
 
   return 0;
+}
+
+
+
+
+bool SendMessage(HANDLE hPipe, const char* message)
+{
+  DWORD bytesWritten;
+  DWORD messageLen = (DWORD)strlen(message) + 1;
+
+  printf("[Host] Sending: %s\n", message);
+
+  if (!WriteFile(hPipe, message, messageLen, &bytesWritten, nullptr))
+  {
+    printf("[Host] Failed to write to pipe. Error: %lu\n", GetLastError());
+    return false;
+  }
+
+  return true;
+}
+
+bool ReceiveMessage(HANDLE hPipe, char* buffer, DWORD bufferSize)
+{
+  DWORD bytesRead;
+
+  if (!ReadFile(hPipe, buffer, bufferSize, &bytesRead, nullptr))
+  {
+    printf("[Parent] Failed to read from pipe. Error: %lu\n", GetLastError());
+    return false;
+  }
+
+  printf("[Parent] Received: %s\n", buffer);
+  return true;
 }

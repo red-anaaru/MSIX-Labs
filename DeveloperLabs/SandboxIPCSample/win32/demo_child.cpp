@@ -142,7 +142,7 @@ int main()
   printf("[Child] Pipe is available, connecting...\n");
 
   // Open the named pipe
-  HANDLE hPipe = CreateFileW(
+  HANDLE hPipe = ::CreateFileW(
     PIPE_NAME,
     GENERIC_READ | GENERIC_WRITE,
     0,
