@@ -91,17 +91,23 @@ bool GetSecurityAttributes(SECURITY_ATTRIBUTES& sa,
   PACL acl = nullptr;
   constexpr unsigned int kMaxExplicitAccessEntries = 2;
   EXPLICIT_ACCESSW ea_list[kMaxExplicitAccessEntries] = {};
-  for (int i = 0; i < kMaxExplicitAccessEntries; i++) {
-    ea_list[i].grfAccessPermissions = FILE_ALL_ACCESS;
-    ea_list[i].grfAccessMode = GRANT_ACCESS;
-    ea_list[i].grfInheritance = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
-    ea_list[i].Trustee.TrusteeForm = TRUSTEE_IS_SID;
-    ea_list[i].Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
-    ea_list[i].Trustee.pMultipleTrustee = nullptr;
-  }
 
+  // first we give access to the "Everyone" SID
+  ea_list[0].grfAccessPermissions = FILE_ALL_ACCESS;
+  ea_list[0].grfAccessMode = GRANT_ACCESS;
+  ea_list[0].grfInheritance = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
+  ea_list[0].Trustee.TrusteeForm = TRUSTEE_IS_SID;
+  ea_list[0].Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+  ea_list[0].Trustee.pMultipleTrustee = nullptr;
   ea_list[0].Trustee.ptstrName = static_cast<LPWCH>(everyone_sid);
+
   // here we explicitly give access to the AppContainer SID
+  ea_list[1].grfAccessPermissions = FILE_ALL_ACCESS;
+  ea_list[1].grfAccessMode = GRANT_ACCESS;
+  ea_list[1].grfInheritance = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
+  ea_list[1].Trustee.TrusteeForm = TRUSTEE_IS_SID;
+  ea_list[1].Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+  ea_list[1].Trustee.pMultipleTrustee = nullptr;
   ea_list[1].Trustee.ptstrName = static_cast<LPWCH>(app_container_sid);
 
   auto result = ::SetEntriesInAclW(kMaxExplicitAccessEntries, ea_list, nullptr, &acl);
@@ -269,7 +275,7 @@ int main()
 
   // Construct full path to child executable
   wchar_t cmdLine[MAX_PATH];
-  swprintf_s(cmdLine, MAX_PATH, L"\"%schild.exe\"", modulePath);
+  swprintf_s(cmdLine, MAX_PATH, L"\"%sdemo_child.exe\"", modulePath);
 
   printf("[Parent] Launching child process: %ls\n", cmdLine);
 
